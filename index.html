@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>地宫自动刷怪 — 完整修复版（含宝箱·金币·休息点·新攻击动画）</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+body{margin:0;display:flex;gap:10px;background:#070710;color:#e6eef6;font-family:monospace;padding:10px}
+.panel{width:360px;background:#101019;padding:12px;border-radius:8px}
+.btn{padding:6px 10px;background:#2b2f36;border:none;color:#fff;margin:6px 0;cursor:pointer;border-radius:6px}
+.inventory{max-height:200px;overflow:auto;background:#0c0c10;padding:6px;border-radius:6px;font-size:13px}
+.item{border:1px solid #222;padding:6px;margin-bottom:6px;border-radius:6px}
+canvas{background:#000;border:1px solid #222}
+#log{width:820px;height:120px;background:#020202;color:#7cff7c;font-size:12px;padding:6px;overflow-y:auto;border:1px solid #253030;margin-top:8px;border-radius:6px}
+.small{font-size:12px;color:#9aa0b2}
+.statbox{margin-top:8px;background:#0b0b10;padding:8px;border-radius:6px;font-size:13px}
+.hidden{display:none}
+/* popup */
+#popup{position:fixed;left:50%;top:40%;transform:translate(-50%,-40%);background:#0b0b10;border:2px solid #37474f;padding:14px;border-radius:8px;display:none;z-index:50;width:420px;color:#e6eef6}
+#popup h3{margin:0 0 8px 0}
+#popup .row{margin:8px 0}
+#overlay{position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:none;z-index:40}
+.info{font-size:13px;color:#9aa0b2}
+.gold{color:#ffd54f;font-weight:bold}
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <h3 style="margin:4px 0">地宫自动刷怪（修复版）</h3>
+  <div id="stats" class="small"></div>
+  Lv <span id="lv">1</span> · EXP <span id="exp">0</span>/<span id="expn">100</span><br>
+  属性点 <span id="pts">10</span> · 金币 <span id="gold">0</span>
+  <hr>
+  STR <span id="s_str">0</span> <button class="btn" id="btn_str">+</button><br>
+  DEX <span id="s_dex">0</span> <button class="btn" id="btn_dex">+</button><br>
+  AGI <span id="s_agi">0</span> <button class="btn" id="btn_agi">+</button><br>
+  HP  <span id="s_hp">0</span> <button class="btn" id="btn_hp">+</button><br>
+  CTR <span id="s_ctr">0</span> <button class="btn" id="btn_ctr">+</button>
+  <hr>
+  武器: <span id="eq_weapon">空</span><br>
+  盔甲: <span id="eq_armor">空</span><br>
+  鞋子: <span id="eq_boots">空</span><br>
+  饰品: <span id="eq_ring">空</span>
+  <hr>
+  <div id="bag" class="inventory"></div>
+
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button class="btn" id="btn_start">开始</button>
+    <button class="btn" id="nextBtn" disabled>下一关</button>
+    <button class="btn hidden" id="btn_restart">重开</button>
+  </div>
+
+  <div class="statbox">
+    <strong>战绩</strong><br>
+    击败怪物: <span id="stat_kills">0</span><br>
+    击败Boss: <span id="stat_boss">0</span><br>
+    最高层数: <span id="stat_best">1</span><br>
+    总输出: <span id="stat_dmg_out">0</span><br>
+    总受伤: <span id="stat_dmg_in">0</span><br>
+    暴击次数: <span id="stat_crit">0</span>
+  </div>
+</div>
+
+<div>
+  <canvas id="cv" width="840" height="480"></canvas>
+  <div id="log"></div>
+</div>
+
+<div id="overlay"></div>
+<div id="popup">
+  <h3 id="popupTitle">标题</h3>
+  <div id="popupBody" class="info"></div>
+  <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn" id="popupBtn1">确定</button>
+    <button class="btn" id="popupBtn2">取消</button>
+  </div>
+</div>
+
+<script>
+/* ====== Config ====== */
+const MONSTER_BASE_STATS = { HP: 80, ATK: 15, DEF: 5 };
+const MONSTER_GROWTH = { HP: 8, ATK: 1.2, DEF: 0.6 };
+const BOSS_BASE_STATS = { HP: 200, ATK: 25, DEF: 15 };
+const BOSS_GROWTH = { HP: 20, ATK: 2, DEF: 1 };
+let EXP_DROP_MULT = 1.0;
+let BOSS_ATTR_MULT = 2.0;
+const QUALITY_COLORS = ['#4a6aff','#b14aff','#ffd93d','#ff4a4a'];
+const QUALITY_MULT = [1.0, 1.4, 2.0, 3.0];
+
+const STR_TO_ATK = 3;
+const DEX_TO_DEF = 3;
+const DEX_TO_HP_PCT = 0.05;
+const HP_TO_HP_PCT = 0.10;
+const AGI_TO_ATK = 1;
+const AGI_INTERVAL_PCT = 0.005;
+const POINT_TO_CR   = 0.01;
+const POINT_TO_CDMG = 0.05;
+const MIN_INTERVAL_MS = 333;
+
+/* ====== Utils ====== */
+function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+/* ====== Canvas & Palette ====== */
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const PALETTE = {
+  '.':'rgba(0,0,0,0)',
+  '1':'#ffd9b3','Y':'#f7e26b','B':'#000000','W':'#ffffff','G':'#555555',
+  'S':'#d0d0d0','3':'#333','2':'#7fc7ff','5':'#ff9999','6':'#77dd77','7':'#ffcc66','9':'#c089ff'
+};
+
+/* ====== Improved Player Sprites (pixel matrices) ====== */
+const FR_IDLE = [
+"................",
+"...BBBBBB.......",
+"..BWWWWWWB......",
+".BWWWWWWWWB.....",
+".BWWWBWWBWB.....",
+".BWWWBWWBWB..YY.",
+".BGWWWWWWGB.YWY.",
+"..BGGGGGGGB.YWY.",
+"...BBBBBB.YWY...",
+"...BWWWWBYWY....",
+"...BWWWWBRY.....",
+"...BWWWWBYYY....",
+"...BWWBWB.YY....",
+"...BWWBWB.......",
+"...BBBBBB.......",
+"................"
+];
+
+const FR_WINDUP = [
+"................",
+"...BBBBBB.......",
+"..BWWWWWWB......",
+".BWWWWWWWWB.....",
+".BWWWBWWBWB.....",
+".BWWWBWWBWB..YY.",
+".BGWWWWWWGB.YWY.",
+"..BGGGG.GGB.YWY.",
+"...BBBBB..YWY...",
+"...BWWWW..WY....",
+"...BWWWW.BY.....",
+"...BWWWWBYY.....",
+"...BWWBWB.YY....",
+"...BWWBWB.......",
+"...BBBBBB.......",
+"................"
+];
+
+const FR_STRIKE = [
+"................",
+"...BBBBBB.......",
+"..BWWWWWWB......",
+".BWWWWWWWWB.....",
+".BWWWBWWBWB.....",
+".BWWWBWWBWB..YY.",
+".BGWWWWWWGB.YWY.",
+"..BGGGGGGGB.YWY.",
+"...BBBBBB.YW....",
+"...BWWWWBYW.....",
+"...BWWWWBR......",
+"...BWWWWB.......",
+"...BWWBWB.......",
+"...BWWBWB.......",
+"...BBBBBB.......",
+"................"
+];
+
+const FR_RECOVER = [
+"................",
+"...BBBBBB.......",
+"..BWWWWWWB......",
+".BWWWWWWWWB.....",
+".BWWWBWWBWB.....",
+".BWWWBWWBWB..YY.",
+".BGWWWWWWGB.YWY.",
+"..BGGGGGGGB.YWY.",
+"...BBBBBB.YWY...",
+"...BWWWWBYWY....",
+"...BWWWWW RY....",
+"...BWWWWBYYY....",
+"...BWWBWB.YY....",
+"...BWWBWB.......",
+"...BBBBBB.......",
+"................"
+];
+
+let PLAYER_SPRITE = FR_IDLE;
+
+/* ====== Monster templates ====== */
+const BASE_TEMPLATE = [
+"................",".......@@.......","......@@@@......",".....@@@@@@.....","....@@@@@@@@....",
+"...@@@@@@@@@@...","...@@@@@@@@@@...","..@@@(..)@@@...","..@@@(..)@@@...","...@@@@@@@@@@...",
+"....@@@@@@......",".....@@@@.......","......@@........","................","................","................"
+];
+const COLOR_SETS = {
+  GREEN:{main:'6',shadow:'3'},
+  BLUE:{main:'2',shadow:'3'},
+  RED:{main:'5',shadow:'3'},
+  PURPLE:{main:'9',shadow:'3'},
+  BOSS:{main:'7',shadow:'3',hl:'7'}
+};
+function recolor(tpl,main,shadow){ return tpl.map(r=>r.replace(/@/g,main).replace(/\(/g,shadow)); }
+function bossify(tpl){ const b=COLOR_SETS.BOSS; return tpl.map(row=>row.split('').map(ch=>{ if(ch==='@') return Math.random()<0.15?b.hl:b.main; if(ch==='(') return b.shadow; return ch; }).join('')); }
+
+const FAMILIES=['SLIME','SKELETON','ORC','DEMON','ELEMENT','DRAGON','MYTH','UNDEAD'];
+let MONSTER_POOL=[];
+FAMILIES.forEach(f=>{
+  MONSTER_POOL.push({name:f+'_G', sprite:recolor(BASE_TEMPLATE, COLOR_SETS.GREEN.main, COLOR_SETS.GREEN.shadow)});
+  MONSTER_POOL.push({name:f+'_B', sprite:recolor(BASE_TEMPLATE, COLOR_SETS.BLUE.main, COLOR_SETS.BLUE.shadow)});
+  MONSTER_POOL.push({name:f+'_R', sprite:recolor(BASE_TEMPLATE, COLOR_SETS.RED.main, COLOR_SETS.RED.shadow)});
+  MONSTER_POOL.push({name:f+'_P', sprite:recolor(BASE_TEMPLATE, COLOR_SETS.PURPLE.main, COLOR_SETS.PURPLE.shadow)});
+  MONSTER_POOL.push({name:f+'_BOSS', sprite:bossify(BASE_TEMPLATE)});
+});
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } }
+shuffle(MONSTER_POOL);
+
+/* ====== Game State ====== */
+let player = {
+  level:1, exp:0, expNext:100, freePts:10,
+  base:{ATK:20,DEF:10,HP:100,CTR:0.10,CDMG:0.5},
+  attrib:{STR:0,DEX:0,AGI:0,HP:0,CTR:0},
+  hp:null, equip:{weapon:null,armor:null,boots:null,ring:null}, inv:[], gold:0
+};
+let stage = 1, enemy = null, running=false;
+let timers = { player:null, enemy:null };
+let fx = { particles:[], crits:[], flashes:[] };
+let anim = { shakeP:0, shakeE:0, pOff:0, eOff:0 };
+const STAT = { kills:0, bossKills:0, bestStage:1, dmgOut:0, dmgIn:0, crits:0 };
+let checkpoint = { active:false, stage:1 };
+
+/* ====== Derived attrs & UI ====== */
+function sumEqAttr(k){ let s=0; for(const slot in player.equip){ const it=player.equip[slot]; if(it && it.attrs && it.attrs[k]) s+= it.attrs[k]; } return s; }
+function calcDerived(){
+  const STR = player.attrib.STR + sumEqAttr('STR');
+  const DEX = player.attrib.DEX + sumEqAttr('DEX');
+  const AGI = player.attrib.AGI + sumEqAttr('AGI');
+  const HPp = player.attrib.HP + sumEqAttr('HP');
+  const CTR = player.attrib.CTR + sumEqAttr('CTR');
+  const agiATK = Math.floor(AGI/2);
+  const ATK = player.base.ATK + STR*STR_TO_ATK + agiATK;
+  const DEF = player.base.DEF + DEX*DEX_TO_DEF;
+  const MAXHP = Math.max(1, Math.floor(player.base.HP * Math.pow(1+DEX_TO_HP_PCT, DEX) * Math.pow(1+HP_TO_HP_PCT, HPp)));
+  const CR = clamp(player.base.CTR + CTR*POINT_TO_CR,0,0.95);
+  const CDMG = player.base.CDMG + CTR*POINT_TO_CDMG;
+  return { ATK, DEF, MAXHP, CR, CDMG, STR, DEX, AGI, HPp, CTR };
+}
+
+function fmtEquip(it){ if(!it) return '空'; return `<span style="color:${QUALITY_COLORS[it.quality]||'#fff'}">${it.name}</span>`; }
+
+function updateUI(){
+  const d = calcDerived();
+  if(player.hp === null) player.hp = d.MAXHP;
+  document.getElementById('stats').innerHTML =
+    `HP <strong>${Math.floor(player.hp)}</strong>/${Math.floor(d.MAXHP)} · ATK ${Math.floor(d.ATK)} · DEF ${Math.floor(d.DEF)}<br>` +
+    `暴击 ${(d.CR*100).toFixed(1)}% · 暴击伤害 ${(d.CDMG*100).toFixed(0)}%`;
+  document.getElementById('lv').innerText = player.level;
+  document.getElementById('exp').innerText = Math.floor(player.exp);
+  document.getElementById('expn').innerText = player.expNext;
+  document.getElementById('pts').innerText = player.freePts;
+  document.getElementById('s_str').innerText = player.attrib.STR;
+  document.getElementById('s_dex').innerText = player.attrib.DEX;
+  document.getElementById('s_agi').innerText = player.attrib.AGI;
+  document.getElementById('s_hp').innerText = player.attrib.HP;
+  document.getElementById('s_ctr').innerText = player.attrib.CTR;
+  ['weapon','armor','boots','ring'].forEach(s=>{
+    document.getElementById('eq_'+s).innerHTML = player.equip[s] ? fmtEquip(player.equip[s]) : '空';
+  });
+  const bag = document.getElementById('bag'); bag.innerHTML = '';
+  player.inv.forEach((it,i)=>{
+    const node = document.createElement('div'); node.className='item';
+    const attrShow = Object.entries(it.attrs||{}).map(([k,v])=>{
+      if(k==='HP') return `${k}:+${v*100*HP_TO_HP_PCT}%`;
+      if(k==='DEX') return `${k}:+${v*DEX_TO_HP_PCT*100}%HP, +${v*DEX_TO_DEF}DEF`;
+      return `${k}:${v}`;
+    }).join(' , ');
+    node.innerHTML = `<strong>${fmtEquip(it)}</strong><div class='small'>品:${['劣质','普通','高级','传说'][it.quality]} ${attrShow}</div>
+      <div style='margin-top:6px'><button class='btn' onclick='equipFromInv(${i})'>装备</button> <button class='btn' onclick='dropInv(${i})'>丢弃</button></div>`;
+    bag.appendChild(node);
+  });
+  document.getElementById('stat_kills').innerText = STAT.kills;
+  document.getElementById('stat_boss').innerText = STAT.bossKills;
+  document.getElementById('stat_best').innerText = STAT.bestStage;
+  document.getElementById('stat_dmg_out').innerText = STAT.dmgOut;
+  document.getElementById('stat_dmg_in').innerText = STAT.dmgIn;
+  document.getElementById('stat_crit').innerText = STAT.crits;
+  document.getElementById('gold').innerText = player.gold;
+}
+
+/* ====== Equipment & Inventory ====== */
+function genEquipForStage(slotOverride){
+  const qroll = Math.random(); let qi=0;
+  if(qroll>0.995) qi=3; else if(qroll>0.95) qi=2; else if(qroll>0.7) qi=1;
+  const slots = ['weapon','armor','boots','ring'];
+  const slot = slotOverride || slots[Math.floor(Math.random()*slots.length)];
+  const monsterLevel = Math.max(1, player.level + 1);
+  const expo = Math.pow(1.05, Math.max(0, stage-1));
+  const baseValue = Math.max(1, Math.floor(monsterLevel * 0.75 * expo));
+  const mult = QUALITY_MULT[qi];
+  let attrs = {};
+  if(slot === 'weapon'){ attrs.STR = Math.max(1, Math.floor(baseValue * mult)); }
+  else if(slot === 'armor'){ attrs.DEX = Math.max(1, Math.floor(baseValue * 0.6 * mult)); attrs.HP = Math.max(1, Math.floor(baseValue * 0.4 * mult)); }
+  else if(slot === 'boots'){ attrs.AGI = Math.max(1, Math.floor(baseValue * 0.5 * mult)); attrs.STR = Math.max(0, Math.floor(baseValue * 0.2 * mult)); }
+  else { const keys=['STR','DEX','AGI','HP','CTR']; let total = Math.max(1, Math.floor(baseValue * mult)); while(total>0){ const k = keys[Math.floor(Math.random()*keys.length)]; attrs[k] = (attrs[k]||0)+1; total--; } }
+  return { name: ['劣质','普通','高级','传说'][qi] + '_' + slot + '_' + Math.floor(Math.random()*9999), quality:qi, slot, attrs, stageReq: stage };
+}
+
+function equipFromInv(idx){ const it=player.inv[idx]; if(!it) return; const prev = player.equip[it.slot]; player.equip[it.slot]=it; player.inv.splice(idx,1); if(prev) player.inv.push(prev); player.hp = Math.min(player.hp || calcDerived().MAXHP, calcDerived().MAXHP); updateUI(); }
+function dropInv(idx){ player.inv.splice(idx,1); updateUI(); }
+function unequip(slot){ if(player.equip[slot]){ player.inv.push(player.equip[slot]); player.equip[slot]=null; updateUI(); } }
+window.equipFromInv = equipFromInv; window.dropInv = dropInv; window.unequip = unequip;
+
+function genLegendaryForBoss(stage, forceStrong=false){
+  const qi = 3;
+  const slots = ['weapon','armor','boots','ring'];
+  const slot = forceStrong ? 'weapon' : slots[Math.floor(Math.random()*slots.length)];
+  const strengthLevel = forceStrong ? (stage + 20) : (stage + randInt(0,6));
+  const baseVal = Math.max(1, Math.floor(strengthLevel * 1.2));
+  const mult = QUALITY_MULT[qi];
+  let attrs = {};
+  if(slot === 'weapon'){ attrs.STR = Math.max(1, Math.floor(baseVal * mult)); }
+  else if(slot === 'armor'){ attrs.DEX = Math.max(1, Math.floor(baseVal * 0.7 * mult)); attrs.HP = Math.max(1, Math.floor(baseVal * 0.4 * mult)); }
+  else if(slot === 'boots'){ attrs.AGI = Math.max(1, Math.floor(baseVal * 0.6 * mult)); attrs.STR = Math.max(0, Math.floor(baseVal * 0.2 * mult)); }
+  else { const keys = ['STR','DEX','AGI','HP','CTR']; let total = Math.max(1, Math.floor(baseVal * mult)); while(total>0){ const k = keys[Math.floor(Math.random()*keys.length)]; attrs[k] = (attrs[k]||0)+1; total--; } }
+  return { name: '传说_'+slot+'_'+Math.floor(Math.random()*9999), quality:qi, slot, attrs, stageReq: stage };
+}
+
+function applyEquipToEntity(ent, item){ if(!item) return; ent.ATK = ent.ATK || 0; ent.DEF = ent.DEF || 0; ent.MAXHP = ent.MAXHP || (ent.HP || 1); ent.HP = ent.HP || ent.MAXHP; ent.CR = ent.CR || 0; ent.CDMG = ent.CDMG || 0; ent.AGI = ent.AGI || 0; if(item.attrs.STR) ent.ATK += item.attrs.STR * STR_TO_ATK; if(item.attrs.DEX) ent.DEF += item.attrs.DEX * DEX_TO_DEF; let pct = 0; if(item.attrs.HP) pct += item.attrs.HP * HP_TO_HP_PCT; if(item.attrs.DEX) pct += item.attrs.DEX * DEX_TO_HP_PCT; if(pct){ ent.MAXHP = Math.floor(ent.MAXHP * (1 + pct)); ent.HP = ent.MAXHP; } if(item.attrs.CTR){ ent.CR = clamp((ent.CR||0) + item.attrs.CTR * POINT_TO_CR, 0, 0.95); ent.CDMG = (ent.CDMG||0) + item.attrs.CTR * POINT_TO_CDMG; } if(item.attrs.AGI){ ent.AGI = (ent.AGI||0) + item.attrs.AGI; ent.ATK += item.attrs.AGI * AGI_TO_ATK; } }
+
+/* ====== Popup helpers ====== */
+const overlay = document.getElementById('overlay'), popup = document.getElementById('popup'), popupTitle = document.getElementById('popupTitle'), popupBody = document.getElementById('popupBody'), popupBtn1 = document.getElementById('popupBtn1'), popupBtn2 = document.getElementById('popupBtn2');
+function showPopup(title, htmlBody, btn1Text='确定', btn2Text='取消'){ overlay.style.display='block'; popup.style.display='block'; popupTitle.innerText = title; popupBody.innerHTML = htmlBody; popupBtn1.innerText = btn1Text; popupBtn2.innerText = btn2Text; }
+function hidePopup(){ overlay.style.display='none'; popup.style.display='none'; popupTitle.innerText=''; popupBody.innerHTML=''; popupBtn1.onclick = null; popupBtn2.onclick = null; }
+
+/* ====== Effects & Log ====== */
+function pushLog(t){ const box=document.getElementById('log'); box.innerHTML += (new Date()).toLocaleTimeString() + ' · ' + t + '<br>'; box.scrollTop = box.scrollHeight; }
+function addHitParticles(x,y,color){ for(let i=0;i<6;i++){ fx.particles.push({ x:x+(Math.random()*10-5), y:y+(Math.random()*10-5), vx:(Math.random()*2-1)*2, vy:(Math.random()*2-1)*2, life:12, color }); } }
+function addCrit(x,y){ fx.crits.push({ x,y,vy:-0.6,life:36,text:'CRIT' }); }
+function addFlash(side){ fx.flashes.push({ side, life:10 }); }
+
+/* ====== Attack animation control (improved) ====== */
+let atkFrameIndex = 0;
+let atkAnimating = false;
+function playAttackAnimation(){
+  if(atkAnimating) return;
+  atkAnimating = true;
+  PLAYER_SPRITE = FR_WINDUP;
+  setTimeout(()=>{ PLAYER_SPRITE = FR_STRIKE; setTimeout(()=>{ PLAYER_SPRITE = FR_RECOVER; setTimeout(()=>{ PLAYER_SPRITE = FR_IDLE; atkAnimating = false; }, 90); }, 90); }, 120);
+}
+
+/* ====== drawSprite restored ====== */
+function drawSprite(sp, x, y, scale=4){
+  for(let r=0;r<sp.length;r++){
+    const row = sp[r];
+    for(let c=0;c<row.length;c++){
+      const ch = row[c];
+      if(ch !== '.'){
+        ctx.fillStyle = PALETTE[ch] || '#fff';
+        ctx.fillRect(x + c*scale, y + r*scale, scale, scale);
+      }
+    }
+  }
+}
+
+/* ====== Combat ====== */
+function getAttackInterval(agi){ const use = Math.min(200, agi); const interval = Math.floor(1000*(1 - use * AGI_INTERVAL_PCT)); return Math.max(MIN_INTERVAL_MS, interval); }
+
+function schedulePlayerAttack(){
+  if(!running || !enemy) return;
+  const d = calcDerived();
+  const interval = getAttackInterval(d.AGI);
+  if(timers.player) clearTimeout(timers.player);
+  timers.player = setTimeout(()=>{
+    if(!running || !enemy) return;
+    const dcalc = calcDerived();
+    const pierced = Math.random() < 0.2;
+    const defFactor = pierced ? enemy.DEF*0.25 : enemy.DEF*0.5;
+    const baseHit = Math.max(1, Math.floor(dcalc.ATK - defFactor));
+    const isCrit = Math.random() < dcalc.CR;
+    const dmg = Math.floor(baseHit * (isCrit ? (1 + dcalc.CDMG) : 1));
+    enemy.HP -= dmg;
+    STAT.dmgOut += dmg;
+    if(isCrit){ STAT.crits++; addCrit(effectPositions.eX+8,effectPositions.y+6); }
+    playAttackAnimation();
+    player.hp = Math.min(dcalc.MAXHP, (player.hp||dcalc.MAXHP) + Math.floor(dmg*0.10));
+    addHitParticles(effectPositions.eX+12, effectPositions.y+12, isCrit? '#ffd500' : '#ff6666');
+    addFlash('enemy');
+    pushLog(`玩家 造成 ${dmg}${isCrit? ' (暴击)':''}${pierced? ' (穿刺)':''} 伤害`);
+    if(enemy.HP <= 0) onEnemyDead(); else schedulePlayerAttack();
+    updateUI();
+  }, interval);
+}
+
+function startEnemyAttack(){
+  if(timers.enemy) clearTimeout(timers.enemy);
+  function step(){
+    if(!running || !enemy) return;
+    const interval = 1000 + (Math.random()*200 - 100);
+    timers.enemy = setTimeout(()=>{
+      if(!running || !enemy) return;
+      const dcalc = calcDerived();
+      let dmg = Math.max(1, Math.floor(enemy.ATK - dcalc.DEF*0.5));
+      const isCrit = Math.random() < (enemy.CR || 0.05);
+      if(isCrit) dmg = Math.floor(dmg * (1 + (enemy.CDMG || 0.25)));
+      player.hp -= dmg;
+      STAT.dmgIn += dmg;
+      anim.shakeP = 6;
+      addHitParticles(effectPositions.pX+12, effectPositions.y+12, '#ff6666');
+      addFlash('player');
+      pushLog(`${enemy.name} 造成 ${dmg}${isCrit? ' (暴击)':''} 傷害`);
+      updateUI();
+      if(player.hp <= 0) onPlayerDead(); else step();
+    }, interval);
+  }
+  step();
+}
+
+/* ====== Enemy gen (player.level + 1) ====== */
+function calcPointPoolForLevel(lv){ let pool = 10 - randInt(1,5); pool = Math.max(5, pool); for(let i=2;i<=lv;i++){ pool += randInt(1,3); } return Math.max(4, Math.floor(pool)); }
+function distributePoints(total){ const keys=['STR','DEX','AGI','HP','CTR']; const out={}; keys.forEach(k=> out[k]=1); let remain = Math.max(0, total - keys.length); while(remain>0){ const k = keys[Math.floor(Math.random()*keys.length)]; out[k] += 1; remain--; } return out; }
+
+function genEnemy(){
+  const isBoss = (stage % 10 === 0);
+  if(MONSTER_POOL.length === 0) shuffle(MONSTER_POOL);
+  const base = MONSTER_POOL[Math.floor(Math.random()*MONSTER_POOL.length)];
+  const lvl = player.level + 1;
+  let baseHP = Math.floor((!isBoss) ? (MONSTER_BASE_STATS.HP + MONSTER_GROWTH.HP * (lvl-1)) : (BOSS_BASE_STATS.HP + BOSS_GROWTH.HP * (lvl-1)));
+  let baseATK = Math.floor((!isBoss) ? (MONSTER_BASE_STATS.ATK + MONSTER_GROWTH.ATK * (lvl-1)) : (BOSS_BASE_STATS.ATK + BOSS_GROWTH.ATK * (lvl-1)));
+  let baseDEF = Math.floor((!isBoss) ? (MONSTER_BASE_STATS.DEF + MONSTER_GROWTH.DEF * (lvl-1)) : (BOSS_BASE_STATS.DEF + BOSS_GROWTH.DEF * (lvl-1)));
+  const pool = calcPointPoolForLevel(lvl);
+  const attrsPoints = distributePoints(pool);
+  const bonusHPpct = attrsPoints.HP * HP_TO_HP_PCT + attrsPoints.DEX * DEX_TO_HP_PCT;
+  const bonusATK = attrsPoints.STR * STR_TO_ATK + attrsPoints.AGI * AGI_TO_ATK;
+  const bonusDEF = attrsPoints.DEX * DEX_TO_DEF;
+  const bonusCR = attrsPoints.CTR * POINT_TO_CR;
+  const bonusCDMG = attrsPoints.CTR * POINT_TO_CDMG;
+  let HP, ATK, DEF;
+  if(!isBoss){
+    HP = Math.floor(baseHP * (1 + bonusHPpct));
+    ATK = Math.floor(baseATK + bonusATK);
+    DEF = Math.floor(baseDEF + bonusDEF);
+  } else {
+    const bossHPpct = bonusHPpct * BOSS_ATTR_MULT;
+    HP = Math.floor(baseHP * (1 + bossHPpct));
+    ATK = Math.floor(baseATK + bonusATK * BOSS_ATTR_MULT);
+    DEF = Math.floor(baseDEF + bonusDEF * BOSS_ATTR_MULT);
+  }
+  const baseCR = 0.05, baseCDMG = 0.25;
+  const CR = clamp(baseCR + bonusCR, 0, 0.95);
+  const CDMG = baseCDMG + bonusCDMG;
+  const enemyObj = {
+    name: (isBoss ? 'BOSS_' : '') + base.name + '_L' + lvl + '_S' + stage,
+    sprite: base.sprite,
+    HP, MAXHP: HP,
+    ATK, DEF,
+    CR, CDMG,
+    attrsPoints,
+    pointPool: pool,
+    AGI: attrsPoints.AGI,
+    isBoss,
+    equip: { weapon:null, armor:null, boots:null, ring:null },
+    dropEXP: Math.max(1, Math.floor(HP * EXP_DROP_MULT * Math.max(1, lvl)))
+  };
+  if(isBoss){
+    if(Math.random() < 0.5){
+      const leg = genLegendaryForBoss(stage);
+      enemyObj.equip[leg.slot] = leg;
+      applyEquipToEntity(enemyObj, leg);
+      enemyObj._bossLegend = leg;
+    } else enemyObj._bossLegend = null;
+  }
+  return enemyObj;
+}
+
+/* ====== Game control & chest/gold/restpoint ====== */
+function startGame(){ if(running) return; if(stage%10===0){ showRestPoint(); return; } enemy = genEnemy(); running = true; document.getElementById('btn_restart').classList.add('hidden'); if(player.hp===null) player.hp = calcDerived().MAXHP; else player.hp = Math.min(calcDerived().MAXHP, player.hp + Math.floor(calcDerived().MAXHP * 0.20)); pushLog(`进入 第 ${stage} 层， 遇到 ${enemy.name} （点数:${enemy.pointPool}）`); document.getElementById('nextBtn').disabled = true; updateUI(); schedulePlayerAttack(); startEnemyAttack(); }
+
+function onEnemyDead(){ running=false; clearTimeout(timers.player); clearTimeout(timers.enemy); pushLog(`✔ 击败 ${enemy.name}`); STAT.kills++; if(enemy.isBoss){ STAT.bossKills++; } STAT.bestStage = Math.max(STAT.bestStage, stage); let goldDrop = 0; if(enemy.isBoss) goldDrop = randInt(100,200); else goldDrop = randInt(15,75); player.gold += goldDrop; pushLog(`掉落金币：${goldDrop}`); let dropItem = null; if(enemy.isBoss){ if(enemy._bossLegend) dropItem = enemy._bossLegend; else dropItem = genLegendaryForBoss(stage, true); if(Math.random() < 0.8){ const extra = genEquipForStage(); player.inv.push(extra); pushLog('掉落：' + extra.name); } } else { if(Math.random() < 0.35){ dropItem = genEquipForStage(); } } if(dropItem){ player.inv.push(dropItem); pushLog('掉落：' + dropItem.name); } if(stage%50===0){ const guaranteed = genEquipForStage(); player.inv.push(guaranteed); let extraChance = Math.random(); if(extraChance<0.5){ const extra = genEquipForStage(); player.inv.push(extra); pushLog('宝箱额外掉落：'+extra.name); } if(Math.random()<0.2){ const legend = genLegendaryForBoss(stage); player.inv.push(legend); pushLog('宝箱惊喜：传说装备！ '+legend.name); } const ap = randInt(1,3); player.freePts += ap; pushLog(`宝箱给予属性点：+${ap}`); showChestPopup(stage); } const gained = enemy.dropEXP; player.exp += gained; pushLog(`获得 ${gained} 经验`); while(player.exp >= player.expNext){ player.exp -= player.expNext; player.level++; player.freePts += 3; player.expNext = Math.floor(player.expNext * 1.1); player.hp = calcDerived().MAXHP; pushLog(`升级！ 等级 ${player.level}`); } document.getElementById('nextBtn').disabled = false; updateUI(); }
+
+function onPlayerDead(){ running=false; clearTimeout(timers.player); clearTimeout(timers.enemy); pushLog('✖ 你已死亡'); updateUI(); if(player.gold>0){ showPopup('你已死亡','你可以花费全部金币复活（消耗全部金币），立即复活并回满生命。','复活','不复活'); popupBtn1.onclick = ()=>{ const cost = player.gold; player.gold = 0; player.hp = calcDerived().MAXHP; updateUI(); hidePopup(); pushLog(`使用 ${cost} 金币复活`); running=true; schedulePlayerAttack(); startEnemyAttack(); }; popupBtn2.onclick = ()=>{ hidePopup(); commitDeathToCheckpointOrRestart(); }; } else { setTimeout(()=>{ commitDeathToCheckpointOrRestart(); }, 80); } }
+
+function commitDeathToCheckpointOrRestart(){ if(checkpoint.active){ pushLog('回到已保存的休息点，扣除所有金币'); player.gold = 0; stage = checkpoint.stage; player.hp = calcDerived().MAXHP; updateUI(); document.getElementById('nextBtn').disabled=false; } else { pushLog('无保存点 - 游戏结束'); document.getElementById('btn_restart').classList.remove('hidden'); alert('你已死亡 - 游戏结束'); } }
+
+function showRestPoint(){ const body = `到达休息点（第 ${stage} 层 - Boss 前）。<br>保存后若死亡会回到此点并扣除所有金币。<br><br><strong>选项：</strong><br>1) 保存并继续（死亡后会回到此点，金币会被扣除）<br>2) 回复 100%（750 金币）<br>3) 回复 50%（500 金币）<br>4) 直接挑战 Boss`; showPopup('休息点', body, '保存并继续', '取消'); popupBtn1.onclick = ()=>{ checkpoint.active = true; checkpoint.stage = stage; pushLog(`已保存休息点：第 ${stage} 层`); hidePopup(); showPopup('休息点','选择：<br><button id="heal100" class="btn">回复100% (750 金币)</button> <button id="heal50" class="btn">回复50% (500 金币)</button> <button id="cont" class="btn">直接挑战</button>','确定'); popupBtn1.style.display='none'; popupBtn2.style.display='none'; document.getElementById('heal100').onclick = ()=>{ if(player.gold>=750){ player.gold-=750; player.hp = calcDerived().MAXHP; pushLog('消耗750金币，回复100%生命'); hidePopup(); startBossAfterRest(); } else { alert('金币不足'); } }; document.getElementById('heal50').onclick = ()=>{ if(player.gold>=500){ player.gold-=500; player.hp = Math.min(calcDerived().MAXHP, Math.floor(calcDerived().MAXHP*0.5)); pushLog('消耗500金币，回复50%生命'); hidePopup(); startBossAfterRest(); } else { alert('金币不足'); } }; document.getElementById('cont').onclick = ()=>{ hidePopup(); startBossAfterRest(); }; }; popupBtn2.onclick = ()=>{ hidePopup(); }; }
+
+function startBossAfterRest(){ enemy = genEnemy(); running = true; document.getElementById('btn_restart').classList.add('hidden'); if(player.hp===null) player.hp = calcDerived().MAXHP; else player.hp = Math.min(calcDerived().MAXHP, player.hp + Math.floor(calcDerived().MAXHP*0.20)); pushLog(`进入 Boss 层 ${stage}， 遇到 ${enemy.name}`); document.getElementById('nextBtn').disabled = true; updateUI(); schedulePlayerAttack(); startEnemyAttack(); }
+
+function showChestPopup(stageAt){ showPopup('宝箱！', `恭喜到达第 ${stageAt} 层的宝箱奖励，已将物品放入背包并获得属性点（若有）`, '确定'); popupBtn1.onclick = ()=>{ hidePopup(); }; popupBtn2.onclick = ()=>{ hidePopup(); }; }
+
+/* ====== Draw loop ====== */
+let effectPositions = { pX:240, eX:480, y:200 };
+function drawEffects(){ for(let i=fx.particles.length-1;i>=0;i--){ const p=fx.particles[i]; ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,3,3); p.x+=p.vx; p.y+=p.vy; p.life--; if(p.life<=0) fx.particles.splice(i,1); } for(let i=fx.crits.length-1;i>=0;i--){ const t=fx.crits[i]; ctx.font='18px monospace'; ctx.fillStyle='#fff'; ctx.strokeStyle='#000'; ctx.lineWidth=3; ctx.strokeText(t.text,t.x,t.y); ctx.fillText(t.text,t.x,t.y); t.y+=t.vy; t.life--; if(t.life<=0) fx.crits.splice(i,1); } for(let i=fx.flashes.length-1;i>=0;i--){ const f=fx.flashes[i]; const rx = f.side==='enemy'? effectPositions.eX : effectPositions.pX; ctx.fillStyle = f.side==='enemy'? 'rgba(255,80,80,0.22)' : 'rgba(255,255,255,0.12)'; ctx.fillRect(rx,effectPositions.y,64,64); f.life--; if(f.life<=0) fx.flashes.splice(i,1); } }
+function drawHPBar(x,y,w,h,hp,maxhp){ ctx.fillStyle='#000000bb'; ctx.fillRect(x,y,w,h); const ratio=Math.max(0, hp/maxhp); ctx.fillStyle = ratio>0.5? '#3f3' : (ratio>0.2? '#ffb86b' : '#f33'); ctx.fillRect(x,y, Math.max(2, Math.floor(w*ratio)), h); ctx.strokeStyle='#222'; ctx.strokeRect(x,y,w,h); }
+function draw(){ ctx.clearRect(0,0,840,480); const tile=32; for(let x=0;x<840;x+=tile) for(let y=0;y<480;y+=tile){ ctx.fillStyle = (((x/tile)+(y/tile))%2===0)? '#0b0b12' : '#11121a'; ctx.fillRect(x,y,tile,tile); } const pShake = anim.shakeP>0?(Math.random()<0.5?-4:4):0; const eShake = anim.shakeE>0?(Math.random()<0.5?-4:4):0; const pX = effectPositions.pX + (anim.pOff>0?-8:0) + pShake; const eX = effectPositions.eX + (anim.eOff>0?8:0) + eShake; if(anim.shakeP>0) anim.shakeP--; if(anim.shakeE>0) anim.shakeE--; if(anim.pOff>0) anim.pOff--; if(anim.eOff>0) anim.eOff--; drawSprite(PLAYER_SPRITE, pX, effectPositions.y, 4); if(enemy) drawSprite(enemy.sprite, eX, effectPositions.y, 4); const pd = calcDerived(); drawHPBar(pX, effectPositions.y-24, 68, 10, player.hp||0, pd.MAXHP); ctx.fillStyle='#cfc'; ctx.font='14px monospace'; ctx.fillText('玩家 Lv'+player.level, pX, effectPositions.y-28); if(enemy){ drawHPBar(eX, effectPositions.y-24, 68, 10, enemy.HP, enemy.MAXHP); ctx.fillStyle='#ffc'; ctx.fillText(enemy.name, eX, effectPositions.y-28); } drawEffects(); requestAnimationFrame(draw); }
+
+/* ====== Bindings & init ====== */
+document.getElementById('btn_str').addEventListener('click', ()=>addAttr('STR'));
+document.getElementById('btn_dex').addEventListener('click', ()=>addAttr('DEX'));
+document.getElementById('btn_agi').addEventListener('click', ()=>addAttr('AGI'));
+document.getElementById('btn_hp').addEventListener('click', ()=>addAttr('HP'));
+document.getElementById('btn_ctr').addEventListener('click', ()=>addAttr('CTR'));
+document.getElementById('btn_start').addEventListener('click', ()=>startGame());
+document.getElementById('nextBtn').addEventListener('click', ()=>{ if(!running) { stage++; player.hp=Math.min(calcDerived().MAXHP, player.hp+Math.floor(calcDerived().MAXHP*0.20)); document.getElementById('nextBtn').disabled=true; startGame(); } });
+document.getElementById('btn_restart').addEventListener('click', ()=>location.reload());
+function addAttr(k){ if(player.freePts<=0) return; player.attrib[k]++; player.freePts--; updateUI(); }
+
+/* ====== Initialize ====== */
+player.hp = calcDerived().MAXHP;
+updateUI();
+draw();
+pushLog('已就绪 — 点击开始游玩');
+window._player = player; window._pool = MONSTER_POOL; window._stat = STAT;
+window.GAME_CONFIG = { MONSTER_BASE_STATS, MONSTER_GROWTH, BOSS_BASE_STATS, BOSS_GROWTH, EXP_DROP_MULT, BOSS_ATTR_MULT, QUALITY_MULT, QUALITY_COLORS };
+</script>
+</body>
+</html>
